@@ -69,6 +69,10 @@ BANNER
 }
 
 # Braille spinner used while we're waiting on network / API calls.
+# IMPORTANT: this writes to stderr, not stdout. It's called from inside
+# run_with_spinner(), whose stdout is often captured via $(...) to get the
+# actual API response — if the spinner wrote to stdout too, its escape
+# codes would get mixed into that captured data and break JSON parsing.
 spinner() {
     local pid=$1 msg=$2
     local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
@@ -76,11 +80,11 @@ spinner() {
     tput civis 2>/dev/null
     while kill -0 "$pid" 2>/dev/null; do
         i=$(( (i + 1) % ${#frames} ))
-        printf "\r${B4}  %s ${CY}%s${RS}   " "${frames:$i:1}" "$msg"
+        printf "\r%b  %s %b%s%b   " "$B4" "${frames:$i:1}" "$CY" "$msg" "$RS" >&2
         sleep 0.08
     done
     tput cnorm 2>/dev/null
-    printf "\r\033[K"
+    printf "\r\033[K" >&2
 }
 
 # Run a command in the background while showing the spinner, capture stdout.
