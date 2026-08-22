@@ -22,12 +22,10 @@ BANNER
     echo -e "\e[33m  -------------------------------------------------------------------\e[0m\n"
 }
 
-# --- NEW BOOT ANIMATION ---
 boot_animation() {
     echo -e "\e[36m[i] Initializing Rempy Virtual Environment...\e[0m"
     echo -ne "\e[90mBooting:\e[0m \e[35m[\e[0m"
     
-    # Draws the loading bar block by block with a slight delay
     for i in {1..25}; do
         echo -ne "\e[32m█\e[0m"
         sleep 0.05
@@ -40,7 +38,7 @@ boot_animation() {
 
 ask_version() {
     echo ""
-    echo -e "\e[36mEnter exact Minecraft version (e.g. 1.20.4, 26.2) or type 'latest':\e[0m"
+    echo -e "\e[36mEnter exact Minecraft version (e.g. 1.20.4, 1.19.2) or type 'latest':\e[0m"
     read -p "> " MC_VER
     if [ -z "$MC_VER" ]; then MC_VER="latest"; fi
 }
@@ -102,12 +100,12 @@ setup_java() {
 
 install_paper() {
     if [ "$MC_VER" == "latest" ]; then
-        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/paper" | jq -r '.versions[-1]')
+        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/paper" | grep -o '"[0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?"' | tail -1 | tr -d '"')
     fi
     echo -e "\e[33mFetching PaperMC $MC_VER...\e[0m"
-    BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$MC_VER" | jq -r '.builds[-1]')
+    BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$MC_VER" | grep -o '"builds":\[[^]]*\]' | grep -o '[0-9]\+' | tail -1)
     
-    if [ "$BUILD" == "null" ] || [ -z "$BUILD" ]; then
+    if [ -z "$BUILD" ]; then
         echo -e "\e[31mError: Version $MC_VER not found! Delete .rempy_installed to try again.\e[0m"
         rm -f "$FLAG_FILE"
         exit 1
@@ -125,16 +123,16 @@ install_purpur() {
 
 install_fabric() {
     if [ "$MC_VER" == "latest" ]; then
-        MC_VER=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | jq -r '.latest.release')
+        MC_VER=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | grep -o '"latest":{"release":"[^"]*"' | cut -d '"' -f 6)
     fi
     
     echo -e "\e[33mDownloading Vanilla server.jar for Fabric...\e[0m"
-    URL=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | jq -r ".versions[] | select(.id==\"$MC_VER\") | .url")
-    DL_URL=$(curl -s "$URL" | jq -r '.downloads.server.url')
+    URL=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | grep -o '{"id":"'"$MC_VER"'","type":"[^"]*","url":"[^"]*"' | grep -o '"url":"[^"]*"' | cut -d '"' -f 4)
+    DL_URL=$(curl -s "$URL" | tr '{' '\n' | grep '"server"' | grep -o '"url":"[^"]*"' | cut -d '"' -f 4 | head -1)
     curl -sSL -o server.jar "$DL_URL"
 
     echo -e "\e[33mFetching latest Fabric Installer...\e[0m"
-    INSTALLER_VER=$(curl -s "https://meta.fabricmc.net/v2/versions/installer" | jq -r '.[0].version')
+    INSTALLER_VER=$(curl -s "https://meta.fabricmc.net/v2/versions/installer" | grep -o '"version":"[^"]*"' | head -1 | cut -d '"' -f 4)
     curl -sSL -o installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/${INSTALLER_VER}/fabric-installer-${INSTALLER_VER}.jar"
     
     echo -e "\e[33mInstalling Fabric...\e[0m"
@@ -145,21 +143,21 @@ install_fabric() {
 
 install_vanilla() {
     if [ "$MC_VER" == "latest" ]; then
-        MC_VER=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | jq -r '.latest.release')
+        MC_VER=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | grep -o '"latest":{"release":"[^"]*"' | cut -d '"' -f 6)
     fi
     echo -e "\e[33mFetching Vanilla $MC_VER...\e[0m"
-    URL=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | jq -r ".versions[] | select(.id==\"$MC_VER\") | .url")
-    DL_URL=$(curl -s "$URL" | jq -r '.downloads.server.url')
-    curl -o server.jar "$DL_URL"
+    URL=$(curl -s "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" | grep -o '{"id":"'"$MC_VER"'","type":"[^"]*","url":"[^"]*"' | grep -o '"url":"[^"]*"' | cut -d '"' -f 4)
+    DL_URL=$(curl -s "$URL" | tr '{' '\n' | grep '"server"' | grep -o '"url":"[^"]*"' | cut -d '"' -f 4 | head -1)
+    curl -sSL -o server.jar "$DL_URL"
     echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
 install_folia() {
     if [ "$MC_VER" == "latest" ]; then
-        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/folia" | jq -r '.versions[-1]')
+        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/folia" | grep -o '"[0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?"' | tail -1 | tr -d '"')
     fi
     echo -e "\e[33mFetching Folia $MC_VER...\e[0m"
-    BUILD=$(curl -s "https://api.papermc.io/v2/projects/folia/versions/$MC_VER" | jq -r '.builds[-1]')
+    BUILD=$(curl -s "https://api.papermc.io/v2/projects/folia/versions/$MC_VER" | grep -o '"builds":\[[^]]*\]' | grep -o '[0-9]\+' | tail -1)
     curl -o server.jar "https://api.papermc.io/v2/projects/folia/versions/$MC_VER/builds/$BUILD/downloads/folia-$MC_VER-$BUILD.jar"
     echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
@@ -173,38 +171,39 @@ setup_bedrock() {
 
 setup_proxy() {
     ask_version
-    echo -e "\e[33mInstalling Proxy...\e[0m"
-    install_paper
+    echo -e "\e[33mInstalling Proxy Engine...\e[0m"
+    
+    if [ "$MC_VER" == "latest" ]; then
+        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/velocity" | grep -o '"[0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?"' | tail -1 | tr -d '"')
+    fi
+    
+    echo -e "\e[33mFetching Velocity $MC_VER...\e[0m"
+    BUILD=$(curl -s "https://api.papermc.io/v2/projects/velocity/versions/$MC_VER" | grep -o '"builds":\[[^]]*\]' | grep -o '[0-9]\+' | tail -1)
+    curl -o server.jar "https://api.papermc.io/v2/projects/velocity/versions/$MC_VER/builds/$BUILD/downloads/velocity-$MC_VER-$BUILD.jar"
+    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
 # --- MAIN EXECUTION ---
 cd "$SERVER_DIR" || exit 1
 
-# 1. Run setup if first time
 if [ ! -f "$FLAG_FILE" ]; then
     first_time_setup
 fi
 
-# 2. Show the banner
 show_banner
 
-# 3. Play the boot animation!
+# Trigger the sleek boot animation right before startup!
 boot_animation
+
 echo -e "\e[90mTip: Delete '.rempy_installed' in Files to re-run engine setup.\e[0m\n"
 
-# 4. Handle EULA automatically
 if [ ! -f eula.txt ]; then
     echo "eula=true" > eula.txt
 fi
 
-# 5. Start the engine
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
     eval "$START_CMD"
 else
     java -Xms128M -Xmx"${SERVER_MEMORY:-1024}"M -jar server.jar
-fi
-    eval "$START_CMD"
-else
-    java -Xms128M -Xmx"${SERVER_MEMORY}"M -jar server.jar
 fi
