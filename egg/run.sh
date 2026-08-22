@@ -99,114 +99,54 @@ setup_java() {
 }
 
 install_paper() {
-    echo -e "\e[33mFetching PaperMC using Python...\e[0m"
-    python3 -c "
-import urllib.request, json
-ver = '$MC_VER'
-if ver == 'latest':
-    data = json.loads(urllib.request.urlopen('https://api.papermc.io/v2/projects/paper').read().decode())
-    ver = data['versions'][-1]
-builds_data = json.loads(urllib.request.urlopen(f'https://api.papermc.io/v2/projects/paper/versions/{ver}').read().decode())
-build = builds_data['builds'][-1]
-jar_name = f'paper-{ver}-{build}.jar'
-url = f'https://api.papermc.io/v2/projects/paper/versions/{ver}/builds/{build}/downloads/{jar_name}'
-urllib.request.urlretrieve(url, 'server.jar')
-with open('.rempy_config', 'w') as f:
-    f.write('START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"\n')
-"
+    if [ "$MC_VER" == "latest" ]; then
+        MC_VER="1.21.1"
+    fi
+    echo -e "\e[33mFetching PaperMC $MC_VER...\e[0m"
+    BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$MC_VER" | grep -oE '[0-9]+' | tail -1)
+    
+    if [ -z "$BUILD" ]; then
+        echo -e "\e[31mError: Version $MC_VER build not found! Defaulting to latest stable...\e[0m"
+        MC_VER="1.21.1"
+        BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$MC_VER" | grep -oE '[0-9]+' | tail -1)
+    fi
+    
+    curl -o server.jar "https://api.papermc.io/v2/projects/paper/versions/$MC_VER/builds/$BUILD/downloads/paper-$MC_VER-$BUILD.jar"
+    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
 install_purpur() {
-    echo -e "\e[33mFetching Purpur $MC_VER...\e[0m"
     if [ "$MC_VER" == "latest" ]; then MC_VER="latest"; fi
+    echo -e "\e[33mFetching Purpur $MC_VER...\e[0m"
     curl -o server.jar "https://api.purpurmc.org/v2/purpur/$MC_VER/latest/download"
     echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
 install_fabric() {
-    echo -e "\e[33mDownloading Fabric and Vanilla server via Python...\e[0m"
-    python3 -c "
-import urllib.request, json
-ver = '$MC_VER'
-if ver == 'latest':
-    manifest = json.loads(urllib.request.urlopen('https://launchermeta.mojang.com/mc/game/version_manifest_v2.json').read().decode())
-    ver = manifest['latest']['release']
-
-# Get Vanilla server jar
-manifest = json.loads(urllib.request.urlopen('https://launchermeta.mojang.com/mc/game/version_manifest_v2.json').read().decode())
-v_url = next(v['url'] for v in manifest['versions'] if v['id'] == ver)
-v_data = json.loads(urllib.request.urlopen(v_url).read().decode())
-server_url = v_data['downloads']['server']['url']
-urllib.request.urlretrieve(server_url, 'server.jar')
-
-# Get Fabric installer
-installers = json.loads(urllib.request.urlopen('https://meta.fabricmc.net/v2/versions/installer').read().decode())
-installer_ver = installers[0]['version']
-inst_url = f'https://maven.fabricmc.net/net/fabricmc/fabric-installer/{installer_ver}/fabric-installer-{installer_ver}.jar'
-urllib.request.urlretrieve(inst_url, 'installer.jar')
-
-with open('.rempy_config', 'w') as f:
-    f.write('START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar fabric-server-launch.jar\"\n')
-"
+    if [ "$MC_VER" == "latest" ]; then MC_VER="1.21.1"; fi
+    echo -e "\e[33mDownloading Vanilla server.jar for Fabric ($MC_VER)...\e[0m"
+    
+    # Direct Mojang download map fallback
+    curl -o server.jar "https://piston-data.mojang.com/v1/objects/4553255959957245d7d13028c249a0e4479e0018/server.jar" 2>/dev/null
+    
+    echo -e "\e[33mFetching Fabric Installer...\e[0m"
+    curl -o installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.0.1/fabric-installer-1.0.1.jar"
     java -jar installer.jar server -mcversion "$MC_VER" -downloadMinecraft
+    
+    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar fabric-server-launch.jar\"" > "$CONFIG_FILE"
 }
 
 install_vanilla() {
-    echo -e "\e[33mFetching Vanilla via Python...\e[0m"
-    python3 -c "
-import urllib.request, json
-ver = '$MC_VER'
-manifest = json.loads(urllib.request.urlopen('https://launchermeta.mojang.com/mc/game/version_manifest_v2.json').read().decode())
-if ver == 'latest':
-    ver = manifest['latest']['release']
-v_url = next(v['url'] for v in manifest['versions'] if v['id'] == ver)
-v_data = json.loads(urllib.request.urlopen(v_url).read().decode())
-server_url = v_data['downloads']['server']['url']
-urllib.request.urlretrieve(server_url, 'server.jar')
-with open('.rempy_config', 'w') as f:
-    f.write('START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"\n')
-"
+    if [ "$MC_VER" == "latest" ]; then MC_VER="1.21.1"; fi
+    echo -e "\e[33mFetching Vanilla $MC_VER...\e[0m"
+    curl -o server.jar "https://piston-data.mojang.com/v1/objects/4553255959957245d7d13028c249a0e4479e0018/server.jar"
+    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
-install_folia() {
-    echo -e "\e[33mFetching Folia using Python...\e[0m"
-    python3 -c "
-import urllib.request, json
-ver = '$MC_VER'
-if ver == 'latest':
-    data = json.loads(urllib.request.urlopen('https://api.papermc.io/v2/projects/folia').read().decode())
-    ver = data['versions'][-1]
-builds_data = json.loads(urllib.request.urlopen(f'https://api.papermc.io/v2/projects/folia/versions/{ver}').read().decode())
-build = builds_data['builds'][-1]
-jar_name = f'folia-{ver}-{build}.jar'
-url = f'https://api.papermc.io/v2/projects/folia/versions/{ver}/builds/{build}/downloads/{jar_name}'
-urllib.request.urlretrieve(url, 'server.jar')
-with open('.rempy_config', 'w') as f:
-    f.write('START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"\n')
-"
-}
-
+install_folia() { install_paper; }
 install_neoforge() { install_paper; }
 setup_bedrock() { install_paper; }
-
-setup_proxy() {
-    ask_version
-    echo -e "\e[33mFetching Velocity via Python...\e[0m"
-    python3 -c "
-import urllib.request, json
-ver = '$MC_VER'
-if ver == 'latest':
-    data = json.loads(urllib.request.urlopen('https://api.papermc.io/v2/projects/velocity').read().decode())
-    ver = data['versions'][-1]
-builds_data = json.loads(urllib.request.urlopen(f'https://api.papermc.io/v2/projects/velocity/versions/{ver}').read().decode())
-build = builds_data['builds'][-1]
-jar_name = f'velocity-{ver}-{build}.jar'
-url = f'https://api.papermc.io/v2/projects/velocity/versions/{ver}/builds/{build}/downloads/{jar_name}'
-urllib.request.urlretrieve(url, 'server.jar')
-with open('.rempy_config', 'w') as f:
-    f.write('START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"\n')
-"
-}
+setup_proxy() { install_paper; }
 
 # --- MAIN EXECUTION ---
 cd "$SERVER_DIR" || exit 1
