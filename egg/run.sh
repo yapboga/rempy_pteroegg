@@ -1,6 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# REMPY HOSTING - ROBUST GAME SERVER LOADER
+# REMPY HOSTING - ROBUST NATIVE GAME SERVER LOADER
 # ==============================================================================
 
 SERVER_DIR="$(pwd)"
@@ -112,13 +112,13 @@ setup_java() {
 
 install_paper() {
     if [ "$MC_VER" = "latest" ]; then
-        # Dynamically grab the absolute latest version from PaperMC API
-        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/paper" | tr '"' '\n' | grep '^[0-9]' | tail -1)
+        # Use awk to extract the latest version cleanly
+        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/paper" | awk -F'"versions":\[' '{print $2}' | awk -F']' '{print $1}' | tr ',' '\n' | tail -1 | tr -d '"')
     fi
-    echo "\033[33mFetching PaperMC $MC_VER...\033[0m"
+    echo "\033[33mFetching PaperMC $MC_VER...\s\033[0m"
     
-    # Safely extract the latest build number without jq
-    BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$MC_VER" | tr ',' '\n' | grep -oE '[0-9]+' | tail -1)
+    # Use awk to extract the latest build number safely
+    BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$MC_VER" | awk -F'"builds":\[' '{print $2}' | awk -F']' '{print $1}' | tr ',' '\n' | tail -1)
     
     if [ -z "$BUILD" ]; then
         echo "\033[31mError: Could not fetch build for version $MC_VER!\033[0m"
