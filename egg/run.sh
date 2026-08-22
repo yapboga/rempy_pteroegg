@@ -106,13 +106,11 @@ install_paper_menu() {
         3) MC_VER="1.21.1"; BUILD="135" ;;
         4) MC_VER="1.20.4"; BUILD="498" ;;
         *) MC_VER="1.21.1"; BUILD="135" ;;
-    es}
+    esac
 
     echo "\033[33mDownloading PaperMC $MC_VER (Build $BUILD)...\033[0m"
-    # Fallback to direct download URL structure to ensure 100% success
     curl -o server.jar "https://api.papermc.io/v2/projects/paper/versions/$MC_VER/builds/$BUILD/downloads/paper-$MC_VER-$BUILD.jar"
     
-    # If the specific build link fails, grab a safe fallback
     if [ ! -f server.jar ] || [ ! -s server.jar ]; then
         curl -o server.jar "https://api.papermc.io/v2/projects/paper/versions/1.21.1/builds/135/downloads/paper-1.21.1-135.jar"
     fi
