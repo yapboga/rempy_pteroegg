@@ -1,200 +1,558 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # ==============================================================================
-# REMPY HOSTING - MENU-DRIVEN GAME SERVER LOADER
+#  REMPY HOSTING — MULTI-EGG MINECRAFT LOADER (v2.0 — live API edition)
+#  Java / Bedrock / Proxy installer with fully dynamic, always-current version
+#  menus. No hardcoded builds — everything is pulled live from the official
+#  download APIs at install time, so the egg never goes stale.
 # ==============================================================================
+
+# Pterodactyl's default startup command is "sh run.sh". This script uses
+# bash-only features (arrays, local -a, here-strings), so if we were launched
+# by dash/sh instead of bash, re-exec ourselves under bash immediately.
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    else
+        echo "This script requires bash, which was not found in this container." >&2
+        echo "Add 'bash' to the egg's Docker image and try again." >&2
+        exit 1
+    fi
+fi
+
+set -u
 
 SERVER_DIR="$(pwd)"
 FLAG_FILE="${SERVER_DIR}/.rempy_installed"
 CONFIG_FILE="${SERVER_DIR}/.rempy_config"
 
-# Self-healing check
-if [ ! -f "run.sh" ]; then
-    echo "Restoring missing run.sh from GitHub..."
-    curl -sSL -o run.sh "https://raw.githubusercontent.com/yapboga/rempy_pteroegg/refs/heads/main/egg/run.sh?cb=$(date +%s)"
-    chmod +x run.sh
-fi
+# A descriptive, non-generic User-Agent is REQUIRED by PaperMC's Fill API and
+# is good practice everywhere else too.
+UA="RempyHosting-Installer/2.0 (+https://rempy.hosting; admin@rempy.hosting)"
+
+# ------------------------------------------------------------------------------
+# COLOR PALETTE — blue / cyan themed
+# ------------------------------------------------------------------------------
+B1="\033[38;5;25m"    # deep blue
+B2="\033[38;5;27m"    # royal blue
+B3="\033[38;5;33m"    # azure
+B4="\033[38;5;39m"    # sky blue
+CY="\033[38;5;51m"    # bright cyan
+WH="\033[97m"
+GY="\033[38;5;245m"
+GN="\033[38;5;46m"
+YL="\033[38;5;220m"
+RD="\033[38;5;203m"
+BD="\033[1m"
+RS="\033[0m"
+
+# ==============================================================================
+# LOW-LEVEL HELPERS
+# ==============================================================================
+
+hr()   { echo -e "${B1}  ────────────────────────────────────────────────────────────${RS}"; }
+pause(){ printf "\n%b  Press [Enter] to continue...%b" "$GY" "$RS"; read -r _; }
 
 show_banner() {
     clear
-    echo "\033[36m"
+    echo -e "${B1}"
     cat << "BANNER"
   ██████╗ ███████╗███╗   ███╗██████╗ ██╗   ██╗
   ██╔══██╗██╔════╝████╗ ████║██╔══██╗╚██╗ ██╔╝
-  ██████╔╝█████╗  ██╔████╔██║██████╔╝ ╚████╔╝ 
-  ██╔══██╗██╔══╝  ██║╚██╔╝██║██╔═══╝   ╚██╔╝  
-  ██║  ██║███████╗██║ ╚═╝ ██║██║        ██║   
-  ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝        ╚═╝   
+  ██████╔╝█████╗  ██╔████╔██║██████╔╝ ╚████╔╝
+  ██╔══██╗██╔══╝  ██║╚██╔╝██║██╔═══╝   ╚██╔╝
+  ██║  ██║███████╗██║ ╚═╝ ██║██║        ██║
+  ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝        ╚═╝
 BANNER
-    echo "\033[35m  ✦ High Performance Cloud Infrastructure | Powered by Rempy Hosting ✦\033[0m"
-    echo "\033[33m  -------------------------------------------------------------------\033[0m\n"
+    echo -e "${RS}${CY}${BD}       High Performance Cloud Infrastructure${RS}"
+    echo -e "${B4}              ✦ Powered by Rempy Hosting ✦${RS}"
+    echo -e "${B2}  ────────────────────────────────────────────────────────────${RS}\n"
+}
+
+# Braille spinner used while we're waiting on network / API calls.
+spinner() {
+    local pid=$1 msg=$2
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    tput civis 2>/dev/null
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % ${#frames} ))
+        printf "\r${B4}  %s ${CY}%s${RS}   " "${frames:$i:1}" "$msg"
+        sleep 0.08
+    done
+    tput cnorm 2>/dev/null
+    printf "\r\033[K"
+}
+
+# Run a command in the background while showing the spinner, capture stdout.
+run_with_spinner() {
+    local msg="$1"; shift
+    local tmp
+    tmp="$(mktemp)"
+    ("$@" > "$tmp" 2>/dev/null) &
+    local pid=$!
+    spinner "$pid" "$msg"
+    wait "$pid"
+    local rc=$?
+    cat "$tmp"
+    rm -f "$tmp"
+    return $rc
 }
 
 boot_animation() {
-    echo "\033[36m[i] Initializing Rempy Virtual Environment...\033[0m"
-    printf "\033[90mBooting:\033[0m \033[35m[\033[0m"
-    
-    i=1
-    while [ $i -le 25 ]; do
-        printf "\033[32m█\033[0m"
-        sleep 0.04
+    echo -e "${B3}[i] Initializing Rempy Virtual Environment...${RS}"
+    printf "%b Booting: %b[%b" "$GY" "$B2" "$RS"
+    local i=1
+    while [ $i -le 30 ]; do
+        printf "%b█%b" "$CY" "$RS"
+        sleep 0.025
         i=$((i + 1))
     done
-    
-    echo "\033[35m]\033[0m \033[32m100%\033[0m"
-    echo "\033[32m[✓] System Ready. Handing over to Game Engine...\033[0m\n"
-    sleep 0.5
+    echo -e "${B2}]${RS} ${GN}100%${RS}"
+    echo -e "${GN}[✓] System Ready. Handing over to Game Engine...${RS}\n"
+    sleep 0.3
+}
+
+install_progress_banner() {
+    echo -e "\n${B2}  ╔═══════════════════════════════════════════════════════════╗${RS}"
+    echo -e "${B2}  ║${RS}  ${CY}${BD}$1${RS}"
+    echo -e "${B2}  ╚═══════════════════════════════════════════════════════════╝${RS}\n"
+}
+
+http_get() {
+    curl -fsSL -A "$UA" --retry 3 --retry-delay 1 --connect-timeout 10 "$1" 2>/dev/null
+}
+
+need_bin() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+ensure_dependencies() {
+    local missing=0
+    for bin in curl jq unzip; do
+        if ! need_bin "$bin"; then
+            missing=1
+            echo -e "${YL}[!] '$bin' not found, attempting install...${RS}"
+            if need_bin apt-get; then
+                apt-get update -qq >/dev/null 2>&1
+                apt-get install -y -qq "$bin" >/dev/null 2>&1
+            elif need_bin apk; then
+                apk add --no-cache "$bin" >/dev/null 2>&1
+            fi
+        fi
+    done
+    for bin in curl jq; do
+        if ! need_bin "$bin"; then
+            echo -e "${RD}[✗] Required tool '$bin' is missing and could not be auto-installed.${RS}"
+            echo -e "${RD}    Please add it to your egg's Docker image and re-run.${RS}"
+            exit 1
+        fi
+    done
+}
+
+# Generic paginated menu.
+# Usage: paginate_and_select "Title" "item1
+# item2
+# ..." "optional per-line description separated by tab"
+# Sets global CHOICE on success, returns 1 on "back".
+CHOICE=""
+paginate_and_select() {
+    local title="$1"
+    local raw="$2"
+    local page_size=10
+    local -a arr=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && arr+=("$line")
+    done <<< "$raw"
+
+    local total=${#arr[@]}
+    if [ "$total" -eq 0 ]; then
+        echo -e "${RD}  No entries returned by the API. Check your network / try again.${RS}"
+        pause
+        CHOICE=""
+        return 1
+    fi
+
+    local total_pages=$(( (total + page_size - 1) / page_size ))
+    local page=0
+
+    while true; do
+        show_banner
+        echo -e "${B4}${BD}  $title${RS}"
+        echo -e "${GY}  Page $((page+1))/${total_pages}   •   ${total} total   •   [N]ext [P]rev [B]ack${RS}"
+        hr
+        local start=$((page * page_size))
+        local end=$((start + page_size))
+        [ "$end" -gt "$total" ] && end=$total
+
+        local idx
+        for (( idx=start; idx<end; idx++ )); do
+            printf "  ${CY}[%2d]${RS}  ${WH}%s${RS}\n" "$((idx - start + 1))" "${arr[$idx]}"
+        done
+        echo ""
+        printf "${B2}  ➤ Select: ${RS}"
+        read -r sel
+
+        case "$sel" in
+            [Nn]|[Nn][Ee][Xx][Tt]) [ $page -lt $((total_pages - 1)) ] && page=$((page + 1)) ;;
+            [Pp]|[Pp][Rr][Ee][Vv]) [ $page -gt 0 ] && page=$((page - 1)) ;;
+            [Bb]|[Bb][Aa][Cc][Kk]) CHOICE=""; return 1 ;;
+            ''|*[!0-9]*) continue ;;
+            *)
+                if [ "$sel" -ge 1 ] && [ "$sel" -le $((end - start)) ]; then
+                    CHOICE="${arr[$((start + sel - 1))]}"
+                    return 0
+                fi
+                ;;
+        esac
+    done
+}
+
+write_config() {
+    # $1 SERVER_TYPE  $2 ENGINE_NAME  $3 MC_VERSION  $4 START_CMD
+    cat > "$CONFIG_FILE" << EOF
+SERVER_TYPE="$1"
+ENGINE_NAME="$2"
+MC_VERSION="$3"
+START_CMD='$4'
+EOF
+}
+
+# ==============================================================================
+# JAVA EDITION — PAPER  (fill.papermc.io v3)
+# ==============================================================================
+install_paper() {
+    install_progress_banner "PaperMC — fetching live version index"
+    local data
+    data=$(run_with_spinner "Talking to fill.papermc.io ..." http_get "https://fill.papermc.io/v3/projects/paper")
+    if [ -z "$data" ]; then
+        echo -e "${RD}[✗] Could not reach the PaperMC Fill API. Check network / try again later.${RS}"
+        pause; return 1
+    fi
+
+    local groups
+    groups=$(echo "$data" | jq -r '.versions | keys[]' | sort -V -r)
+    paginate_and_select "PaperMC — select a major version family" "$groups" || return 1
+    local GROUP="$CHOICE"
+
+    local versions
+    versions=$(echo "$data" | jq -r --arg g "$GROUP" '.versions[$g][]' | sort -V -r)
+    paginate_and_select "PaperMC $GROUP — select an exact release" "$versions" || return 1
+    local VERSION="$CHOICE"
+
+    install_progress_banner "PaperMC $VERSION — resolving latest stable build"
+    local builds
+    builds=$(run_with_spinner "Fetching build list..." http_get "https://fill.papermc.io/v3/projects/paper/versions/${VERSION}/builds")
+    local DL_URL
+    DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="STABLE")] | sort_by(.id) | last | .downloads."server:default".url // empty')
+    if [ -z "$DL_URL" ]; then
+        DL_URL=$(echo "$builds" | jq -r 'sort_by(.id) | last | .downloads."server:default".url // empty')
+        [ -n "$DL_URL" ] && echo -e "${YL}[!] No STABLE build for $VERSION yet — using the latest available build instead.${RS}"
+    fi
+    if [ -z "$DL_URL" ]; then
+        echo -e "${RD}[✗] No downloadable build found for $VERSION.${RS}"; pause; return 1
+    fi
+
+    echo -e "${CY}[i] Downloading Paper $VERSION ...${RS}"
+    curl -A "$UA" -# -L -o server.jar "$DL_URL"
+    write_config "java" "PaperMC" "$VERSION" 'java -Xms128M -Xmx${SERVER_MEMORY:-1024}M -jar server.jar --nogui'
+}
+
+# ==============================================================================
+# JAVA EDITION — PURPUR  (api.purpurmc.org v2)
+# ==============================================================================
+install_purpur() {
+    install_progress_banner "Purpur — fetching live version index"
+    local data
+    data=$(run_with_spinner "Talking to api.purpurmc.org ..." http_get "https://api.purpurmc.org/v2/purpur")
+    if [ -z "$data" ]; then
+        echo -e "${RD}[✗] Could not reach the Purpur API.${RS}"; pause; return 1
+    fi
+
+    local versions
+    versions=$(echo "$data" | jq -r '.versions[]' | sort -V -r)
+    paginate_and_select "Purpur — select a Minecraft version" "$versions" || return 1
+    local VERSION="$CHOICE"
+
+    echo -e "${CY}[i] Downloading Purpur $VERSION (latest build) ...${RS}"
+    curl -A "$UA" -# -L -o server.jar "https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download"
+    write_config "java" "Purpur" "$VERSION" 'java -Xms128M -Xmx${SERVER_MEMORY:-1024}M -jar server.jar --nogui'
+}
+
+# ==============================================================================
+# JAVA EDITION — FABRIC  (meta.fabricmc.net v2)
+# ==============================================================================
+install_fabric() {
+    install_progress_banner "Fabric — fetching live game version index"
+
+    show_banner
+    echo -e "${B4}${BD}  Fabric — show which versions?${RS}"
+    hr
+    echo -e "  ${CY}[1]${RS}  Stable releases only ${GY}(recommended)${RS}"
+    echo -e "  ${CY}[2]${RS}  Everything, including snapshots"
+    printf "\n${B2}  ➤ Select: ${RS}"
+    read -r stab_choice
+
+    local data filter
+    data=$(run_with_spinner "Talking to meta.fabricmc.net ..." http_get "https://meta.fabricmc.net/v2/versions/game")
+    if [ -z "$data" ]; then
+        echo -e "${RD}[✗] Could not reach the Fabric meta API.${RS}"; pause; return 1
+    fi
+    if [ "$stab_choice" = "2" ]; then
+        filter='.[] | .version'
+    else
+        filter='.[] | select(.stable==true) | .version'
+    fi
+    local versions
+    versions=$(echo "$data" | jq -r "$filter")   # already newest-first from the API
+    paginate_and_select "Fabric — select a Minecraft version" "$versions" || return 1
+    local GAME_VERSION="$CHOICE"
+
+    install_progress_banner "Fabric $GAME_VERSION — resolving loader + installer"
+    local loader_data loader_ver installer_data installer_ver
+    loader_data=$(run_with_spinner "Fetching loader versions..." http_get "https://meta.fabricmc.net/v2/versions/loader/${GAME_VERSION}")
+    loader_ver=$(echo "$loader_data" | jq -r '[.[] | select(.loader.stable==true)] | .[0].loader.version // empty')
+    [ -z "$loader_ver" ] && loader_ver=$(echo "$loader_data" | jq -r '.[0].loader.version // empty')
+
+    installer_data=$(run_with_spinner "Fetching installer versions..." http_get "https://meta.fabricmc.net/v2/versions/installer")
+    installer_ver=$(echo "$installer_data" | jq -r '[.[] | select(.stable==true)] | .[0].version // empty')
+    [ -z "$installer_ver" ] && installer_ver=$(echo "$installer_data" | jq -r '.[0].version // empty')
+
+    if [ -z "$loader_ver" ] || [ -z "$installer_ver" ]; then
+        echo -e "${RD}[✗] Could not resolve a loader/installer pair for $GAME_VERSION.${RS}"; pause; return 1
+    fi
+
+    echo -e "${CY}[i] Downloading Fabric server for $GAME_VERSION (loader $loader_ver, installer $installer_ver) ...${RS}"
+    curl -A "$UA" -# -L -o server.jar \
+        "https://meta.fabricmc.net/v2/versions/loader/${GAME_VERSION}/${loader_ver}/${installer_ver}/server/jar"
+    write_config "java" "Fabric" "$GAME_VERSION" 'java -Xms128M -Xmx${SERVER_MEMORY:-1024}M -jar server.jar --nogui'
+}
+
+# ==============================================================================
+# JAVA EDITION — VANILLA  (Mojang piston-meta)
+# ==============================================================================
+install_vanilla() {
+    install_progress_banner "Vanilla — fetching live Mojang version manifest"
+
+    show_banner
+    echo -e "${B4}${BD}  Vanilla — show which versions?${RS}"
+    hr
+    echo -e "  ${CY}[1]${RS}  Official releases only ${GY}(recommended)${RS}"
+    echo -e "  ${CY}[2]${RS}  Everything, including snapshots"
+    printf "\n${B2}  ➤ Select: ${RS}"
+    read -r stab_choice
+
+    local manifest filter
+    manifest=$(run_with_spinner "Talking to piston-meta.mojang.com ..." http_get "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+    if [ -z "$manifest" ]; then
+        echo -e "${RD}[✗] Could not reach Mojang's version manifest.${RS}"; pause; return 1
+    fi
+    if [ "$stab_choice" = "2" ]; then
+        filter='.versions[] | .id'
+    else
+        filter='.versions[] | select(.type=="release") | .id'
+    fi
+    # The manifest is already ordered newest-first; keep that order (do NOT
+    # re-sort with sort -V — Mojang's 2026 calendar versioning, e.g. "26.2",
+    # cannot be reliably compared against legacy "1.21.x" strings).
+    local versions
+    versions=$(echo "$manifest" | jq -r "$filter")
+    paginate_and_select "Vanilla — select a Minecraft version" "$versions" || return 1
+    local VERSION="$CHOICE"
+
+    install_progress_banner "Vanilla $VERSION — resolving server jar"
+    local ver_url ver_json dl_url
+    ver_url=$(echo "$manifest" | jq -r --arg v "$VERSION" '.versions[] | select(.id==$v) | .url')
+    ver_json=$(run_with_spinner "Fetching release metadata..." http_get "$ver_url")
+    dl_url=$(echo "$ver_json" | jq -r '.downloads.server.url // empty')
+    if [ -z "$dl_url" ]; then
+        echo -e "${RD}[✗] This version has no server download (client-only release?).${RS}"; pause; return 1
+    fi
+
+    echo -e "${CY}[i] Downloading Vanilla $VERSION ...${RS}"
+    curl -A "$UA" -# -L -o server.jar "$dl_url"
+    write_config "java" "Vanilla" "$VERSION" 'java -Xms128M -Xmx${SERVER_MEMORY:-1024}M -jar server.jar --nogui'
+}
+
+# ==============================================================================
+# BEDROCK EDITION
+# ==============================================================================
+install_bedrock() {
+    install_progress_banner "Bedrock Dedicated Server — resolving latest build"
+    echo -e "${GY}[i] Mojang does not publish a public JSON API for Bedrock, so this reads${RS}"
+    echo -e "${GY}    the official download page directly.${RS}\n"
+
+    local page bedrock_url
+    page=$(run_with_spinner "Talking to minecraft.net ..." curl -fsSL -A "Mozilla/5.0 (X11; Linux x86_64) $UA" "https://www.minecraft.net/en-us/download/server/bedrock")
+    bedrock_url=$(echo "$page" | grep -oE 'https://[^"'"'"']+bin-linux/bedrock-server-[^"'"'"']+\.zip' | head -n1)
+
+    if [ -z "$bedrock_url" ]; then
+        echo -e "${RD}[✗] Could not auto-detect the current Bedrock build (Mojang's page changed or is${RS}"
+        echo -e "${RD}    blocking automated requests).${RS}"
+        echo -e "${YL}[i] Grab the Linux server manually from:${RS}"
+        echo -e "    ${CY}https://www.minecraft.net/en-us/download/server/bedrock${RS}"
+        printf "\n${B2}  ➤ Paste the direct .zip URL here (or leave blank to cancel): ${RS}"
+        read -r bedrock_url
+        [ -z "$bedrock_url" ] && { pause; return 1; }
+    fi
+
+    local fname; fname=$(basename "$bedrock_url")
+    local ver; ver=$(echo "$fname" | grep -oE '[0-9]+(\.[0-9]+){2,3}')
+
+    echo -e "${CY}[i] Downloading Bedrock Dedicated Server ${ver:-$fname} ...${RS}"
+    curl -A "$UA" -# -L -o bedrock-server.zip "$bedrock_url"
+
+    echo -e "${CY}[i] Unpacking ...${RS}"
+    unzip -o -q bedrock-server.zip -x "*.pdb" && rm -f bedrock-server.zip
+    chmod +x bedrock_server 2>/dev/null
+
+    write_config "bedrock" "Bedrock Dedicated Server" "${ver:-unknown}" 'LD_LIBRARY_PATH=. ./bedrock_server'
+}
+
+# ==============================================================================
+# PROXY — VELOCITY (fill.papermc.io) / BUNGEECORD (ci.md-5.net)
+# ==============================================================================
+install_velocity() {
+    install_progress_banner "Velocity — fetching live version index"
+    local data
+    data=$(run_with_spinner "Talking to fill.papermc.io ..." http_get "https://fill.papermc.io/v3/projects/velocity")
+    if [ -z "$data" ]; then
+        echo -e "${RD}[✗] Could not reach the PaperMC Fill API.${RS}"; pause; return 1
+    fi
+
+    local groups
+    groups=$(echo "$data" | jq -r '.versions | keys[]' | sort -V -r)
+    paginate_and_select "Velocity — select a major version family" "$groups" || return 1
+    local GROUP="$CHOICE"
+
+    local versions
+    versions=$(echo "$data" | jq -r --arg g "$GROUP" '.versions[$g][]' | sort -V -r)
+    paginate_and_select "Velocity $GROUP — select an exact release" "$versions" || return 1
+    local VERSION="$CHOICE"
+
+    local builds DL_URL
+    builds=$(run_with_spinner "Fetching build list..." http_get "https://fill.papermc.io/v3/projects/velocity/versions/${VERSION}/builds")
+    DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="RECOMMENDED")] | sort_by(.id) | last | .downloads."server:default".url // empty')
+    [ -z "$DL_URL" ] && DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="STABLE")] | sort_by(.id) | last | .downloads."server:default".url // empty')
+    [ -z "$DL_URL" ] && DL_URL=$(echo "$builds" | jq -r 'sort_by(.id) | last | .downloads."server:default".url // empty')
+
+    if [ -z "$DL_URL" ]; then
+        echo -e "${RD}[✗] No downloadable build found for Velocity $VERSION.${RS}"; pause; return 1
+    fi
+
+    echo -e "${CY}[i] Downloading Velocity $VERSION ...${RS}"
+    curl -A "$UA" -# -L -o server.jar "$DL_URL"
+    write_config "proxy" "Velocity" "$VERSION" 'java -Xms128M -Xmx${SERVER_MEMORY:-1024}M -jar server.jar'
+}
+
+install_bungeecord() {
+    install_progress_banner "BungeeCord — fetching latest CI build"
+    echo -e "${CY}[i] Downloading latest successful BungeeCord build ...${RS}"
+    curl -A "$UA" -# -L -o server.jar \
+        "https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/artifact/bootstrap/target/BungeeCord.jar"
+    write_config "proxy" "BungeeCord" "latest" 'java -Xms128M -Xmx${SERVER_MEMORY:-1024}M -jar server.jar'
+}
+
+# ==============================================================================
+# MENUS
+# ==============================================================================
+java_menu() {
+    while true; do
+        show_banner
+        echo -e "${B4}${BD}  Java Edition — choose a server engine${RS}"
+        hr
+        echo -e "  ${CY}[1]${RS} ${WH}PaperMC${RS}   ${GY}— optimized, most plugin-compatible, best default choice${RS}"
+        echo -e "  ${CY}[2]${RS} ${WH}Purpur${RS}    ${GY}— Paper fork with extra gameplay/config options${RS}"
+        echo -e "  ${CY}[3]${RS} ${WH}Fabric${RS}    ${GY}— lightweight modding platform${RS}"
+        echo -e "  ${CY}[4]${RS} ${WH}Vanilla${RS}   ${GY}— official unmodified Mojang server${RS}"
+        echo -e "  ${CY}[B]${RS} ${GY}Back${RS}"
+        printf "\n${B2}  ➤ Select: ${RS}"
+        read -r c
+        case "$c" in
+            1) install_paper && return 0 ;;
+            2) install_purpur && return 0 ;;
+            3) install_fabric && return 0 ;;
+            4) install_vanilla && return 0 ;;
+            [Bb]) return 1 ;;
+        esac
+    done
+}
+
+proxy_menu() {
+    while true; do
+        show_banner
+        echo -e "${B4}${BD}  Proxy Server — choose software${RS}"
+        hr
+        echo -e "  ${CY}[1]${RS} ${WH}Velocity${RS}    ${GY}— modern, fast, actively maintained (recommended)${RS}"
+        echo -e "  ${CY}[2]${RS} ${WH}BungeeCord${RS}  ${GY}— legacy, widest plugin support${RS}"
+        echo -e "  ${CY}[B]${RS} ${GY}Back${RS}"
+        printf "\n${B2}  ➤ Select: ${RS}"
+        read -r c
+        case "$c" in
+            1) install_velocity && return 0 ;;
+            2) install_bungeecord && return 0 ;;
+            [Bb]) return 1 ;;
+        esac
+    done
 }
 
 first_time_setup() {
-    show_banner
-    echo "\033[32m[+] Welcome to Rempy Hosting! Let's set up your server software.\033[0m\n"
-    echo "Select your server category:"
-    echo "  [1] Java Edition (Minecraft Server Engines)"
-    echo "  [2] Bedrock Edition (Mobile / Console / Cross-play)"
-    echo "  [3] Proxy Server (Network & Bungee / Velocity)"
-    echo ""
-    printf "Enter choice (1-3): "
-    read CAT_CHOICE
+    while true; do
+        show_banner
+        echo -e "${GN}${BD}  Welcome to Rempy Hosting!${RS} ${WH}Let's set up your server.${RS}"
+        hr
+        echo -e "  ${CY}[1]${RS} ${WH}Java Edition${RS}     ${GY}— PaperMC / Purpur / Fabric / Vanilla${RS}"
+        echo -e "  ${CY}[2]${RS} ${WH}Bedrock Edition${RS}  ${GY}— mobile / console / cross-play${RS}"
+        echo -e "  ${CY}[3]${RS} ${WH}Proxy Server${RS}     ${GY}— Velocity / BungeeCord${RS}"
+        printf "\n${B2}  ➤ Select: ${RS}"
+        read -r c
 
-    case "$CAT_CHOICE" in
-        1) setup_java ;;
-        2) setup_bedrock ;;
-        3) setup_proxy ;;
-        *) echo "\033[31mInvalid choice. Defaulting to PaperMC...\033[0m"; install_paper_menu ;;
-    esac
+        case "$c" in
+            1) java_menu && break ;;
+            2) install_bedrock && break ;;
+            3) proxy_menu && break ;;
+            *) ;;
+        esac
+    done
 
     touch "$FLAG_FILE"
-    echo "\033[32m\n[✓] Installation completed successfully!\033[0m"
+    echo -e "\n${GN}${BD}[✓] Installation completed successfully!${RS}"
+    if [ -f "$CONFIG_FILE" ]; then
+        . "$CONFIG_FILE"
+        echo -e "${GY}    Engine:  ${WH}${ENGINE_NAME:-unknown}${RS}"
+        echo -e "${GY}    Version: ${WH}${MC_VERSION:-unknown}${RS}"
+    fi
     sleep 2
 }
 
-setup_java() {
-    show_banner
-    echo "Select Java Engine:"
-    echo "  [1] PaperMC (Optimized & Standard)"
-    echo "  [2] Purpur (High Performance & Customizable)"
-    echo "  [3] Fabric (Lightweight Modded Engine)"
-    echo "  [4] Vanilla (Official Mojang Release)"
-    echo ""
-    printf "Enter choice (1-4): "
-    read JAVA_CHOICE
-
-    case "$JAVA_CHOICE" in
-        1) install_paper_menu ;;
-        2) install_purpur_menu ;;
-        3) install_fabric_menu ;;
-        4) install_vanilla_menu ;;
-        *) install_paper_menu ;;
-    esac
-}
-
-# --- PAPER VERSION MENU ---
-install_paper_menu() {
-    show_banner
-    echo "Select PaperMC Version:"
-    echo "  [1] 26.2 (Latest 2026 Release)"
-    echo "  [2] 26.1.1"
-    echo "  [3] 1.21.1 (Stable Classic)"
-    echo "  [4] 1.20.4"
-    echo ""
-    printf "Enter choice (1-4): "
-    read VER_CHOICE
-
-    case "$VER_CHOICE" in
-        1) MC_VER="26.2"; BUILD="1" ;;
-        2) MC_VER="26.1.1"; BUILD="1" ;;
-        3) MC_VER="1.21.1"; BUILD="135" ;;
-        4) MC_VER="1.20.4"; BUILD="498" ;;
-        *) MC_VER="1.21.1"; BUILD="135" ;;
-    esac
-
-    echo "\033[33mDownloading PaperMC $MC_VER (Build $BUILD)...\033[0m"
-    curl -o server.jar "https://api.papermc.io/v2/projects/paper/versions/$MC_VER/builds/$BUILD/downloads/paper-$MC_VER-$BUILD.jar"
-    
-    if [ ! -f server.jar ] || [ ! -s server.jar ]; then
-        curl -o server.jar "https://api.papermc.io/v2/projects/paper/versions/1.21.1/builds/135/downloads/paper-1.21.1-135.jar"
-    fi
-
-    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
-}
-
-# --- PURPUR VERSION MENU ---
-install_purpur_menu() {
-    show_banner
-    echo "Select Purpur Version:"
-    echo "  [1] Latest (Auto-update)"
-    echo "  [2] 1.21.1"
-    echo ""
-    printf "Enter choice (1-2): "
-    read P_CHOICE
-    
-    P_VER="latest"
-    if [ "$P_CHOICE" = "2" ]; then P_VER="1.21.1"; fi
-
-    echo "\033[33mDownloading Purpur ($P_VER)...\033[0m"
-    curl -o server.jar "https://api.purpurmc.org/v2/purpur/$P_VER/latest/download"
-    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
-}
-
-# --- FABRIC VERSION MENU ---
-install_fabric_menu() {
-    show_banner
-    echo "Select Fabric Version:"
-    echo "  [1] 26.2"
-    echo "  [2] 1.21.1"
-    echo ""
-    printf "Enter choice (1-2): "
-    read F_CHOICE
-
-    F_VER="1.21.1"
-    if [ "$F_CHOICE" = "1" ]; then F_VER="26.2"; fi
-
-    echo "\033[33mDownloading Vanilla base for Fabric ($F_VER)...\033[0m"
-    curl -o server.jar "https://piston-data.mojang.com/v1/objects/4553255959957245d7d13028c249a0e4479e0018/server.jar" 2>/dev/null
-    
-    echo "\033[33mInstalling Fabric Installer...\033[0m"
-    curl -o installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.0.1/fabric-installer-1.0.1.jar"
-    java -jar installer.jar server -mcversion "$F_VER" -downloadMinecraft
-    
-    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar fabric-server-launch.jar\"" > "$CONFIG_FILE"
-}
-
-# --- VANILLA VERSION MENU ---
-install_vanilla_menu() {
-    show_banner
-    echo "Select Vanilla Version:"
-    echo "  [1] 1.21.1"
-    echo ""
-    printf "Enter choice [1]: "
-    read V_CHOICE
-
-    echo "\033[33mDownloading Vanilla...\033[0m"
-    curl -o server.jar "https://piston-data.mojang.com/v1/objects/4553255959957245d7d13028c249a0e4479e0018/server.jar"
-    echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
-}
-
-install_bedrock() { install_paper_menu; }
-install_proxy() { install_paper_menu; }
-
-# --- MAIN EXECUTION ---
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
 cd "$SERVER_DIR" || exit 1
+ensure_dependencies
 
 if [ ! -f "$FLAG_FILE" ]; then
-    touch "$FLAG_FILE"
     first_time_setup
 fi
 
 show_banner
 boot_animation
-echo "\033[90mTip: Delete '.rempy_installed' in Files to re-run engine setup.\033[0m\n"
-
-if [ ! -f eula.txt ]; then
-    echo "eula=true" > eula.txt
-fi
 
 if [ -f "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
+    [ -n "${ENGINE_NAME:-}" ] && echo -e "${B4}  Engine   ${WH}${ENGINE_NAME}${RS}"
+    [ -n "${MC_VERSION:-}" ] && echo -e "${B4}  Version  ${WH}${MC_VERSION}${RS}\n"
+fi
+
+echo -e "${GY}Tip: delete '.rempy_installed' in Files to re-run engine setup.${RS}\n"
+
+if [ "${SERVER_TYPE:-java}" = "java" ] || [ "${SERVER_TYPE:-}" = "proxy" ]; then
+    [ -f eula.txt ] || echo "eula=true" > eula.txt
+fi
+
+if [ -f "$CONFIG_FILE" ] && [ -n "${START_CMD:-}" ]; then
     eval "$START_CMD"
 else
-    java -Xms128M -Xmx"${SERVER_MEMORY:-1024}"M -jar server.jar
+    echo -e "${RD}[✗] No start command found — installation may have failed. Delete${RS}"
+    echo -e "${RD}    '.rempy_installed' in Files and re-run to try again.${RS}"
+    exit 1
 fi
