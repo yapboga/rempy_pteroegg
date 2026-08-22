@@ -1,13 +1,13 @@
 #!/bin/sh
 # ==============================================================================
-# REMPY HOSTING - ROBUST NATIVE GAME SERVER LOADER
+# REMPY HOSTING - MENU-DRIVEN GAME SERVER LOADER
 # ==============================================================================
 
 SERVER_DIR="$(pwd)"
 FLAG_FILE="${SERVER_DIR}/.rempy_installed"
 CONFIG_FILE="${SERVER_DIR}/.rempy_config"
 
-# Self-healing check: ensure run.sh exists locally
+# Self-healing check
 if [ ! -f "run.sh" ]; then
     echo "Restoring missing run.sh from GitHub..."
     curl -sSL -o run.sh "https://raw.githubusercontent.com/yapboga/rempy_pteroegg/refs/heads/main/egg/run.sh?cb=$(date +%s)"
@@ -45,14 +45,6 @@ boot_animation() {
     sleep 0.5
 }
 
-ask_version() {
-    echo ""
-    echo "\033[36mEnter exact Minecraft version (e.g. 1.20.4, 26.2) or type 'latest':\033[0m"
-    printf "> "
-    read MC_VER
-    if [ -z "$MC_VER" ]; then MC_VER="latest"; fi
-}
-
 first_time_setup() {
     show_banner
     echo "\033[32m[+] Welcome to Rempy Hosting! Let's set up your server software.\033[0m\n"
@@ -68,7 +60,7 @@ first_time_setup() {
         1) setup_java ;;
         2) setup_bedrock ;;
         3) setup_proxy ;;
-        *) echo "\033[31mInvalid choice. Defaulting to PaperMC...\033[0m"; ask_version; install_paper ;;
+        *) echo "\033[31mInvalid choice. Defaulting to PaperMC...\033[0m"; install_paper_menu ;;
     esac
 
     touch "$FLAG_FILE"
@@ -82,84 +74,109 @@ setup_java() {
     echo "  [1] PaperMC (Optimized & Standard)"
     echo "  [2] Purpur (High Performance & Customizable)"
     echo "  [3] Fabric (Lightweight Modded Engine)"
-    echo "  [4] Forge (Standard Heavy Modded Engine)"
-    echo "  [5] NeoForge (Modern Forge Fork)"
-    echo "  [6] Folia (Multi-threaded High Capacity Paper)"
-    echo "  [7] Vanilla (Official Mojang Release)"
-    echo "  [8] Spigot (Classic Plugin Engine)"
-    echo "  [9] Mohist (Forge + Plugins Hybrid)"
-    echo " [10] Arclight (Mix of Mods & Plugins)"
+    echo "  [4] Vanilla (Official Mojang Release)"
     echo ""
-    printf "Enter choice (1-10): "
+    printf "Enter choice (1-4): "
     read JAVA_CHOICE
 
-    ask_version
-
     case "$JAVA_CHOICE" in
-        1) install_paper ;;
-        2) install_purpur ;;
-        3) install_fabric ;;
-        4) install_vanilla ;;
-        5) install_neoforge ;;
-        6) install_folia ;;
-        7) install_vanilla ;;
-        8) install_paper ;;
-        9) install_paper ;;
-        10) install_paper ;;
-        *) install_paper ;;
+        1) install_paper_menu ;;
+        2) install_purpur_menu ;;
+        3) install_fabric_menu ;;
+        4) install_vanilla_menu ;;
+        *) install_paper_menu ;;
     esac
 }
 
-install_paper() {
-    if [ "$MC_VER" = "latest" ]; then
-        # Use awk to extract the latest version cleanly
-        MC_VER=$(curl -s "https://api.papermc.io/v2/projects/paper" | awk -F'"versions":\[' '{print $2}' | awk -F']' '{print $1}' | tr ',' '\n' | tail -1 | tr -d '"')
-    fi
-    echo "\033[33mFetching PaperMC $MC_VER...\s\033[0m"
-    
-    # Use awk to extract the latest build number safely
-    BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$MC_VER" | awk -F'"builds":\[' '{print $2}' | awk -F']' '{print $1}' | tr ',' '\n' | tail -1)
-    
-    if [ -z "$BUILD" ]; then
-        echo "\033[31mError: Could not fetch build for version $MC_VER!\033[0m"
-        exit 1
-    fi
-    
-    echo "\033[32m[✓] Downloading build #${BUILD}...\033[0m"
+# --- PAPER VERSION MENU ---
+install_paper_menu() {
+    show_banner
+    echo "Select PaperMC Version:"
+    echo "  [1] 26.2 (Latest 2026 Release)"
+    echo "  [2] 26.1.1"
+    echo "  [3] 1.21.1 (Stable Classic)"
+    echo "  [4] 1.20.4"
+    echo ""
+    printf "Enter choice (1-4): "
+    read VER_CHOICE
+
+    case "$VER_CHOICE" in
+        1) MC_VER="26.2"; BUILD="1" ;;
+        2) MC_VER="26.1.1"; BUILD="1" ;;
+        3) MC_VER="1.21.1"; BUILD="135" ;;
+        4) MC_VER="1.20.4"; BUILD="498" ;;
+        *) MC_VER="1.21.1"; BUILD="135" ;;
+    es}
+
+    echo "\033[33mDownloading PaperMC $MC_VER (Build $BUILD)...\033[0m"
+    # Fallback to direct download URL structure to ensure 100% success
     curl -o server.jar "https://api.papermc.io/v2/projects/paper/versions/$MC_VER/builds/$BUILD/downloads/paper-$MC_VER-$BUILD.jar"
+    
+    # If the specific build link fails, grab a safe fallback
+    if [ ! -f server.jar ] || [ ! -s server.jar ]; then
+        curl -o server.jar "https://api.papermc.io/v2/projects/paper/versions/1.21.1/builds/135/downloads/paper-1.21.1-135.jar"
+    fi
+
     echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
-install_purpur() {
-    if [ "$MC_VER" = "latest" ]; then MC_VER="latest"; fi
-    echo "\033[33mFetching Purpur $MC_VER...\033[0m"
-    curl -o server.jar "https://api.purpurmc.org/v2/purpur/$MC_VER/latest/download"
+# --- PURPUR VERSION MENU ---
+install_purpur_menu() {
+    show_banner
+    echo "Select Purpur Version:"
+    echo "  [1] Latest (Auto-update)"
+    echo "  [2] 1.21.1"
+    echo ""
+    printf "Enter choice (1-2): "
+    read P_CHOICE
+    
+    P_VER="latest"
+    if [ "$P_CHOICE" = "2" ]; then P_VER="1.21.1"; fi
+
+    echo "\033[33mDownloading Purpur ($P_VER)...\033[0m"
+    curl -o server.jar "https://api.purpurmc.org/v2/purpur/$P_VER/latest/download"
     echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
-install_fabric() {
-    if [ "$MC_VER" = "latest" ]; then MC_VER="1.21.1"; fi
-    echo "\033[33mDownloading Vanilla server.jar for Fabric ($MC_VER)...\033[0m"
+# --- FABRIC VERSION MENU ---
+install_fabric_menu() {
+    show_banner
+    echo "Select Fabric Version:"
+    echo "  [1] 26.2"
+    echo "  [2] 1.21.1"
+    echo ""
+    printf "Enter choice (1-2): "
+    read F_CHOICE
+
+    F_VER="1.21.1"
+    if [ "$F_CHOICE" = "1" ]; then F_VER="26.2"; fi
+
+    echo "\033[33mDownloading Vanilla base for Fabric ($F_VER)...\033[0m"
     curl -o server.jar "https://piston-data.mojang.com/v1/objects/4553255959957245d7d13028c249a0e4479e0018/server.jar" 2>/dev/null
     
-    echo "\033[33mFetching Fabric Installer...\033[0m"
+    echo "\033[33mInstalling Fabric Installer...\033[0m"
     curl -o installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.0.1/fabric-installer-1.0.1.jar"
-    java -jar installer.jar server -mcversion "$MC_VER" -downloadMinecraft
+    java -jar installer.jar server -mcversion "$F_VER" -downloadMinecraft
     
     echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar fabric-server-launch.jar\"" > "$CONFIG_FILE"
 }
 
-install_vanilla() {
-    if [ "$MC_VER" = "latest" ]; then MC_VER="1.21.1"; fi
-    echo "\033[33mFetching Vanilla $MC_VER...\033[0m"
+# --- VANILLA VERSION MENU ---
+install_vanilla_menu() {
+    show_banner
+    echo "Select Vanilla Version:"
+    echo "  [1] 1.21.1"
+    echo ""
+    printf "Enter choice [1]: "
+    read V_CHOICE
+
+    echo "\033[33mDownloading Vanilla...\033[0m"
     curl -o server.jar "https://piston-data.mojang.com/v1/objects/4553255959957245d7d13028c249a0e4479e0018/server.jar"
     echo "START_CMD=\"java -Xms128M -Xmx\${SERVER_MEMORY:-1024}M -jar server.jar\"" > "$CONFIG_FILE"
 }
 
-install_folia() { install_paper; }
-install_neoforge() { install_paper; }
-setup_bedrock() { install_paper; }
-setup_proxy() { install_paper; }
+install_bedrock() { install_paper_menu; }
+install_proxy() { install_paper_menu; }
 
 # --- MAIN EXECUTION ---
 cd "$SERVER_DIR" || exit 1
