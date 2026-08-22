@@ -118,35 +118,95 @@ install_progress_banner() {
     echo -e "${B2}  ╚═══════════════════════════════════════════════════════════╝${RS}\n"
 }
 
-http_get() {
-    curl -fsSL -A "$UA" --retry 3 --retry-delay 1 --connect-timeout 10 "$1" 2>/dev/null
-}
-
 need_bin() {
     command -v "$1" >/dev/null 2>&1
 }
 
+http_get() {
+    curl -fsSL -A "$UA" --retry 3 --retry-delay 1 --connect-timeout 10 "$1" 2>/dev/null
+}
+
+# A writable, no-root-required local bin dir that we prepend to PATH. Any
+# tool we fetch ourselves (like a static jq binary) lands here.
+LOCAL_BIN="${SERVER_DIR}/.rempy_bin"
+mkdir -p "$LOCAL_BIN" 2>/dev/null
+case ":$PATH:" in
+    *":$LOCAL_BIN:"*) ;;
+    *) PATH="$LOCAL_BIN:$PATH" ;;
+esac
+export PATH
+
+apt_install_if_root() {
+    # Only ever attempt apt if we're actually root — most Pterodactyl
+    # containers run as an unprivileged user and 'apt-get install' just
+    # fails silently (no sudo available), which is what was happening here.
+    [ "$(id -u 2>/dev/null)" = "0" ] || return 1
+    need_bin apt-get || return 1
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq "$1" >/dev/null 2>&1
+    need_bin "$1"
+}
+
+# jq has no dependencies, so worst case we just fetch the static binary —
+# no root needed at all.
+ensure_jq() {
+    need_bin jq && return 0
+    echo -e "${YL}[!] 'jq' not found, attempting install...${RS}"
+    if apt_install_if_root jq; then
+        echo -e "${GN}[✓] jq installed via apt.${RS}"
+        return 0
+    fi
+    echo -e "${GY}    Fetching a static jq binary instead (no root required)...${RS}"
+    local arch
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *)             arch="amd64" ;;
+    esac
+    curl -fsSL -A "$UA" -o "${LOCAL_BIN}/jq" \
+        "https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}" 2>/dev/null
+    chmod +x "${LOCAL_BIN}/jq" 2>/dev/null
+    if need_bin jq; then
+        echo -e "${GN}[✓] jq installed to ${LOCAL_BIN}.${RS}"
+        return 0
+    fi
+    echo -e "${RD}[✗] Required tool 'jq' is missing and could not be auto-installed.${RS}"
+    echo -e "${RD}    Please add it to your egg's Docker image and re-run.${RS}"
+    exit 1
+}
+
+# unzip is only needed for the Bedrock flow, and even then we have a
+# fallback: the JDK's own 'jar' tool can extract zip files (jar files ARE
+# zip files), and every Java egg already ships a JDK.
+extract_zip() {
+    local zipfile="$1" destdir="$2"
+    mkdir -p "$destdir"
+    if need_bin unzip; then
+        unzip -o -q "$zipfile" -d "$destdir"
+        return $?
+    fi
+    apt_install_if_root unzip && { unzip -o -q "$zipfile" -d "$destdir"; return $?; }
+    if need_bin jar; then
+        echo -e "${GY}    'unzip' unavailable — extracting with the JDK's 'jar' tool instead.${RS}"
+        ( cd "$destdir" && jar xf "$(cd "$(dirname "$zipfile")" && pwd)/$(basename "$zipfile")" )
+        return $?
+    fi
+    if need_bin python3; then
+        echo -e "${GY}    'unzip' unavailable — extracting with python3 instead.${RS}"
+        python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zipfile" "$destdir"
+        return $?
+    fi
+    echo -e "${RD}[✗] No tool available to extract .zip files (need unzip, jar, or python3).${RS}"
+    return 1
+}
+
 ensure_dependencies() {
-    local missing=0
-    for bin in curl jq unzip; do
-        if ! need_bin "$bin"; then
-            missing=1
-            echo -e "${YL}[!] '$bin' not found, attempting install...${RS}"
-            if need_bin apt-get; then
-                apt-get update -qq >/dev/null 2>&1
-                apt-get install -y -qq "$bin" >/dev/null 2>&1
-            elif need_bin apk; then
-                apk add --no-cache "$bin" >/dev/null 2>&1
-            fi
-        fi
-    done
-    for bin in curl jq; do
-        if ! need_bin "$bin"; then
-            echo -e "${RD}[✗] Required tool '$bin' is missing and could not be auto-installed.${RS}"
-            echo -e "${RD}    Please add it to your egg's Docker image and re-run.${RS}"
-            exit 1
-        fi
-    done
+    if ! need_bin curl; then
+        echo -e "${RD}[✗] 'curl' is missing from this image and cannot be auto-installed safely.${RS}"
+        echo -e "${RD}    Please add it to your egg's Docker image and re-run.${RS}"
+        exit 1
+    fi
+    ensure_jq
 }
 
 # Generic paginated menu.
@@ -402,7 +462,7 @@ install_bedrock() {
     curl -A "$UA" -# -L -o bedrock-server.zip "$bedrock_url"
 
     echo -e "${CY}[i] Unpacking ...${RS}"
-    unzip -o -q bedrock-server.zip -x "*.pdb" && rm -f bedrock-server.zip
+    extract_zip bedrock-server.zip "$SERVER_DIR" && rm -f bedrock-server.zip
     chmod +x bedrock_server 2>/dev/null
 
     write_config "bedrock" "Bedrock Dedicated Server" "${ver:-unknown}" 'LD_LIBRARY_PATH=. ./bedrock_server'
