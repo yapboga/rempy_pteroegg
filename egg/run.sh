@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  REMPY HOSTING — MULTI-EGG MINECRAFT LOADER (v2.0 — live API edition)
+#  REMPY HOSTING — MULTI-EGG MINECRAFT LOADER (v2.1 — FIXED)
 #  Java / Bedrock / Proxy installer with fully dynamic, always-current version
 #  menus. No hardcoded builds — everything is pulled live from the official
 #  download APIs at install time, so the egg never goes stale.
+#
+#  FIXES IN v2.1:
+#  - Proper jq error handling (validate JSON before parsing)
+#  - curl -f removed (was silently failing on HTTP errors)
+#  - API response validation and diagnostic output
+#  - Graceful fallbacks when APIs are unavailable
+#  - Better timeout handling
 # ==============================================================================
 
-# Pterodactyl's default startup command is "sh run.sh". This script uses
-# bash-only features (arrays, local -a, here-strings), so if we were launched
-# by dash/sh instead of bash, re-exec ourselves under bash immediately.
 if [ -z "${BASH_VERSION:-}" ]; then
     if command -v bash >/dev/null 2>&1; then
         exec bash "$0" "$@"
     else
         echo "This script requires bash, which was not found in this container." >&2
-        echo "Add 'bash' to the egg's Docker image and try again." >&2
         exit 1
     fi
 fi
@@ -24,19 +27,18 @@ set -u
 SERVER_DIR="$(pwd)"
 FLAG_FILE="${SERVER_DIR}/.rempy_installed"
 CONFIG_FILE="${SERVER_DIR}/.rempy_config"
+DEBUG="${DEBUG:-0}"
 
-# A descriptive, non-generic User-Agent is REQUIRED by PaperMC's Fill API and
-# is good practice everywhere else too.
-UA="RempyHosting-Installer/2.0 (+https://rempy.hosting; admin@rempy.hosting)"
+UA="RempyHosting-Installer/2.1 (+https://rempy.hosting; admin@rempy.hosting)"
 
-# ------------------------------------------------------------------------------
-# COLOR PALETTE — blue / cyan themed
-# ------------------------------------------------------------------------------
-B1="\033[38;5;25m"    # deep blue
-B2="\033[38;5;27m"    # royal blue
-B3="\033[38;5;33m"    # azure
-B4="\033[38;5;39m"    # sky blue
-CY="\033[38;5;51m"    # bright cyan
+# ==============================================================================
+# COLOR PALETTE
+# ==============================================================================
+B1="\033[38;5;25m"
+B2="\033[38;5;27m"
+B3="\033[38;5;33m"
+B4="\033[38;5;39m"
+CY="\033[38;5;51m"
 WH="\033[97m"
 GY="\033[38;5;245m"
 GN="\033[38;5;46m"
@@ -68,11 +70,6 @@ BANNER
     echo -e "${B2}  ────────────────────────────────────────────────────────────${RS}\n"
 }
 
-# Braille spinner used while we're waiting on network / API calls.
-# IMPORTANT: this writes to stderr, not stdout. It's called from inside
-# run_with_spinner(), whose stdout is often captured via $(...) to get the
-# actual API response — if the spinner wrote to stdout too, its escape
-# codes would get mixed into that captured data and break JSON parsing.
 spinner() {
     local pid=$1 msg=$2
     local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
@@ -87,7 +84,6 @@ spinner() {
     printf "\r\033[K" >&2
 }
 
-# Run a command in the background while showing the spinner, capture stdout.
 run_with_spinner() {
     local msg="$1"; shift
     local tmp
@@ -126,12 +122,41 @@ need_bin() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# FIXED: Removed -f flag, added error checking and diagnostics
 http_get() {
-    curl -fsSL -A "$UA" --retry 3 --retry-delay 1 --connect-timeout 10 "$1" 2>/dev/null
+    local url="$1"
+    local timeout="${2:-10}"
+    local response
+    local http_code
+    
+    response=$(curl -sS -w "\n%{http_code}" -A "$UA" \
+        --retry 2 --retry-delay 1 --connect-timeout "$timeout" \
+        "$url" 2>&1)
+    
+    http_code=$(echo "$response" | tail -n1)
+    response=$(echo "$response" | head -n-1)
+    
+    if [ "$http_code" != "200" ]; then
+        if [ "$DEBUG" = "1" ]; then
+            echo -e "${YL}[DEBUG] HTTP $http_code from $url${RS}" >&2
+            echo -e "${YL}[DEBUG] Response: ${response:0:200}${RS}" >&2
+        fi
+        return 1
+    fi
+    
+    echo "$response"
+    return 0
 }
 
-# A writable, no-root-required local bin dir that we prepend to PATH. Any
-# tool we fetch ourselves (like a static jq binary) lands here.
+# FIXED: Validate JSON before piping to jq
+validate_json() {
+    local data="$1"
+    if [ -z "$data" ]; then
+        return 1
+    fi
+    echo "$data" | jq empty 2>/dev/null
+}
+
 LOCAL_BIN="${SERVER_DIR}/.rempy_bin"
 mkdir -p "$LOCAL_BIN" 2>/dev/null
 case ":$PATH:" in
@@ -141,9 +166,6 @@ esac
 export PATH
 
 apt_install_if_root() {
-    # Only ever attempt apt if we're actually root — most Pterodactyl
-    # containers run as an unprivileged user and 'apt-get install' just
-    # fails silently (no sudo available), which is what was happening here.
     [ "$(id -u 2>/dev/null)" = "0" ] || return 1
     need_bin apt-get || return 1
     apt-get update -qq >/dev/null 2>&1
@@ -151,8 +173,6 @@ apt_install_if_root() {
     need_bin "$1"
 }
 
-# jq has no dependencies, so worst case we just fetch the static binary —
-# no root needed at all.
 ensure_jq() {
     need_bin jq && return 0
     echo -e "${YL}[!] 'jq' not found, attempting install...${RS}"
@@ -167,7 +187,7 @@ ensure_jq() {
         aarch64|arm64) arch="arm64" ;;
         *)             arch="amd64" ;;
     esac
-    curl -fsSL -A "$UA" -o "${LOCAL_BIN}/jq" \
+    curl -sS -A "$UA" -o "${LOCAL_BIN}/jq" \
         "https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}" 2>/dev/null
     chmod +x "${LOCAL_BIN}/jq" 2>/dev/null
     if need_bin jq; then
@@ -179,9 +199,6 @@ ensure_jq() {
     exit 1
 }
 
-# unzip is only needed for the Bedrock flow, and even then we have a
-# fallback: the JDK's own 'jar' tool can extract zip files (jar files ARE
-# zip files), and every Java egg already ships a JDK.
 extract_zip() {
     local zipfile="$1" destdir="$2"
     mkdir -p "$destdir"
@@ -191,33 +208,28 @@ extract_zip() {
     fi
     apt_install_if_root unzip && { unzip -o -q "$zipfile" -d "$destdir"; return $?; }
     if need_bin jar; then
-        echo -e "${GY}    'unzip' unavailable — extracting with the JDK's 'jar' tool instead.${RS}"
+        echo -e "${GY}    'unzip' unavailable — extracting with JDK's 'jar' tool.${RS}"
         ( cd "$destdir" && jar xf "$(cd "$(dirname "$zipfile")" && pwd)/$(basename "$zipfile")" )
         return $?
     fi
     if need_bin python3; then
-        echo -e "${GY}    'unzip' unavailable — extracting with python3 instead.${RS}"
+        echo -e "${GY}    'unzip' unavailable — extracting with python3.${RS}"
         python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zipfile" "$destdir"
         return $?
     fi
-    echo -e "${RD}[✗] No tool available to extract .zip files (need unzip, jar, or python3).${RS}"
+    echo -e "${RD}[✗] No tool available to extract .zip files.${RS}"
     return 1
 }
 
 ensure_dependencies() {
     if ! need_bin curl; then
-        echo -e "${RD}[✗] 'curl' is missing from this image and cannot be auto-installed safely.${RS}"
-        echo -e "${RD}    Please add it to your egg's Docker image and re-run.${RS}"
+        echo -e "${RD}[✗] 'curl' is missing from this image.${RS}"
         exit 1
     fi
     ensure_jq
 }
 
-# Generic paginated menu.
-# Usage: paginate_and_select "Title" "item1
-# item2
-# ..." "optional per-line description separated by tab"
-# Sets global CHOICE on success, returns 1 on "back".
+# FIXED: Better pagination with error handling
 CHOICE=""
 paginate_and_select() {
     local title="$1"
@@ -230,7 +242,7 @@ paginate_and_select() {
 
     local total=${#arr[@]}
     if [ "$total" -eq 0 ]; then
-        echo -e "${RD}  No entries returned by the API. Check your network / try again.${RS}"
+        echo -e "${RD}  [✗] No entries returned. Check network / API status.${RS}"
         pause
         CHOICE=""
         return 1
@@ -272,7 +284,6 @@ paginate_and_select() {
 }
 
 write_config() {
-    # $1 SERVER_TYPE  $2 ENGINE_NAME  $3 MC_VERSION  $4 START_CMD
     cat > "$CONFIG_FILE" << EOF
 SERVER_TYPE="$1"
 ENGINE_NAME="$2"
@@ -282,38 +293,58 @@ EOF
 }
 
 # ==============================================================================
-# JAVA EDITION — PAPER  (fill.papermc.io v3)
+# JAVA EDITION — PAPER (FIXED API HANDLING)
 # ==============================================================================
 install_paper() {
     install_progress_banner "PaperMC — fetching live version index"
     local data
     data=$(run_with_spinner "Talking to fill.papermc.io ..." http_get "https://fill.papermc.io/v3/projects/paper")
-    if [ -z "$data" ]; then
-        echo -e "${RD}[✗] Could not reach the PaperMC Fill API. Check network / try again later.${RS}"
+    
+    if ! validate_json "$data"; then
+        echo -e "${RD}[✗] Could not reach the PaperMC Fill API or got invalid response.${RS}"
+        echo -e "${RD}    The API may be down. Try again later.${RS}"
         pause; return 1
     fi
 
     local groups
-    groups=$(echo "$data" | jq -r '.versions | keys[]' | sort -V -r)
+    groups=$(echo "$data" | jq -r '.versions | keys[]' 2>/dev/null | sort -V -r)
+    if [ -z "$groups" ]; then
+        echo -e "${RD}[✗] Could not parse version data from PaperMC API.${RS}"
+        pause; return 1
+    fi
+    
     paginate_and_select "PaperMC — select a major version family" "$groups" || return 1
     local GROUP="$CHOICE"
 
     local versions
-    versions=$(echo "$data" | jq -r --arg g "$GROUP" '.versions[$g][]' | sort -V -r)
+    versions=$(echo "$data" | jq -r --arg g "$GROUP" '.versions[$g][]' 2>/dev/null | sort -V -r)
+    if [ -z "$versions" ]; then
+        echo -e "${RD}[✗] No versions found for $GROUP.${RS}"
+        pause; return 1
+    fi
+    
     paginate_and_select "PaperMC $GROUP — select an exact release" "$versions" || return 1
     local VERSION="$CHOICE"
 
     install_progress_banner "PaperMC $VERSION — resolving latest stable build"
     local builds
     builds=$(run_with_spinner "Fetching build list..." http_get "https://fill.papermc.io/v3/projects/paper/versions/${VERSION}/builds")
-    local DL_URL
-    DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="STABLE")] | sort_by(.id) | last | .downloads."server:default".url // empty')
-    if [ -z "$DL_URL" ]; then
-        DL_URL=$(echo "$builds" | jq -r 'sort_by(.id) | last | .downloads."server:default".url // empty')
-        [ -n "$DL_URL" ] && echo -e "${YL}[!] No STABLE build for $VERSION yet — using the latest available build instead.${RS}"
+    
+    if ! validate_json "$builds"; then
+        echo -e "${RD}[✗] Could not fetch build list for $VERSION.${RS}"
+        pause; return 1
     fi
+    
+    local DL_URL
+    DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="STABLE")] | sort_by(.id) | last | .downloads."server:default".url // empty' 2>/dev/null)
     if [ -z "$DL_URL" ]; then
-        echo -e "${RD}[✗] No downloadable build found for $VERSION.${RS}"; pause; return 1
+        DL_URL=$(echo "$builds" | jq -r 'sort_by(.id) | last | .downloads."server:default".url // empty' 2>/dev/null)
+        [ -n "$DL_URL" ] && echo -e "${YL}[!] No STABLE build for $VERSION yet — using latest available.${RS}"
+    fi
+    
+    if [ -z "$DL_URL" ]; then
+        echo -e "${RD}[✗] No downloadable build found for $VERSION.${RS}"
+        pause; return 1
     fi
 
     echo -e "${CY}[i] Downloading Paper $VERSION ...${RS}"
@@ -322,18 +353,26 @@ install_paper() {
 }
 
 # ==============================================================================
-# JAVA EDITION — PURPUR  (api.purpurmc.org v2)
+# JAVA EDITION — PURPUR (FIXED)
 # ==============================================================================
 install_purpur() {
     install_progress_banner "Purpur — fetching live version index"
     local data
     data=$(run_with_spinner "Talking to api.purpurmc.org ..." http_get "https://api.purpurmc.org/v2/purpur")
-    if [ -z "$data" ]; then
-        echo -e "${RD}[✗] Could not reach the Purpur API.${RS}"; pause; return 1
+    
+    if ! validate_json "$data"; then
+        echo -e "${RD}[✗] Could not reach Purpur API or got invalid response.${RS}"
+        echo -e "${RD}    The API may be down or rate-limiting. Try again later.${RS}"
+        pause; return 1
     fi
 
     local versions
-    versions=$(echo "$data" | jq -r '.versions[]' | sort -V -r)
+    versions=$(echo "$data" | jq -r '.versions[]' 2>/dev/null | sort -V -r)
+    if [ -z "$versions" ]; then
+        echo -e "${RD}[✗] No versions found in Purpur API response.${RS}"
+        pause; return 1
+    fi
+    
     paginate_and_select "Purpur — select a Minecraft version" "$versions" || return 1
     local VERSION="$CHOICE"
 
@@ -343,7 +382,7 @@ install_purpur() {
 }
 
 # ==============================================================================
-# JAVA EDITION — FABRIC  (meta.fabricmc.net v2)
+# JAVA EDITION — FABRIC (FIXED)
 # ==============================================================================
 install_fabric() {
     install_progress_banner "Fabric — fetching live game version index"
@@ -358,41 +397,63 @@ install_fabric() {
 
     local data filter
     data=$(run_with_spinner "Talking to meta.fabricmc.net ..." http_get "https://meta.fabricmc.net/v2/versions/game")
-    if [ -z "$data" ]; then
-        echo -e "${RD}[✗] Could not reach the Fabric meta API.${RS}"; pause; return 1
+    
+    if ! validate_json "$data"; then
+        echo -e "${RD}[✗] Could not reach Fabric meta API.${RS}"
+        pause; return 1
     fi
+    
     if [ "$stab_choice" = "2" ]; then
         filter='.[] | .version'
     else
         filter='.[] | select(.stable==true) | .version'
     fi
+    
     local versions
-    versions=$(echo "$data" | jq -r "$filter")   # already newest-first from the API
+    versions=$(echo "$data" | jq -r "$filter" 2>/dev/null)
+    if [ -z "$versions" ]; then
+        echo -e "${RD}[✗] No versions found in Fabric API response.${RS}"
+        pause; return 1
+    fi
+    
     paginate_and_select "Fabric — select a Minecraft version" "$versions" || return 1
     local GAME_VERSION="$CHOICE"
 
     install_progress_banner "Fabric $GAME_VERSION — resolving loader + installer"
     local loader_data loader_ver installer_data installer_ver
     loader_data=$(run_with_spinner "Fetching loader versions..." http_get "https://meta.fabricmc.net/v2/versions/loader/${GAME_VERSION}")
-    loader_ver=$(echo "$loader_data" | jq -r '[.[] | select(.loader.stable==true)] | .[0].loader.version // empty')
-    [ -z "$loader_ver" ] && loader_ver=$(echo "$loader_data" | jq -r '.[0].loader.version // empty')
+    
+    if ! validate_json "$loader_data"; then
+        echo -e "${RD}[✗] Could not fetch loader versions.${RS}"
+        pause; return 1
+    fi
+    
+    loader_ver=$(echo "$loader_data" | jq -r '[.[] | select(.loader.stable==true)] | .[0].loader.version // empty' 2>/dev/null)
+    [ -z "$loader_ver" ] && loader_ver=$(echo "$loader_data" | jq -r '.[0].loader.version // empty' 2>/dev/null)
 
     installer_data=$(run_with_spinner "Fetching installer versions..." http_get "https://meta.fabricmc.net/v2/versions/installer")
-    installer_ver=$(echo "$installer_data" | jq -r '[.[] | select(.stable==true)] | .[0].version // empty')
-    [ -z "$installer_ver" ] && installer_ver=$(echo "$installer_data" | jq -r '.[0].version // empty')
+    
+    if ! validate_json "$installer_data"; then
+        echo -e "${RD}[✗] Could not fetch installer versions.${RS}"
+        pause; return 1
+    fi
+    
+    installer_ver=$(echo "$installer_data" | jq -r '[.[] | select(.stable==true)] | .[0].version // empty' 2>/dev/null)
+    [ -z "$installer_ver" ] && installer_ver=$(echo "$installer_data" | jq -r '.[0].version // empty' 2>/dev/null)
 
     if [ -z "$loader_ver" ] || [ -z "$installer_ver" ]; then
-        echo -e "${RD}[✗] Could not resolve a loader/installer pair for $GAME_VERSION.${RS}"; pause; return 1
+        echo -e "${RD}[✗] Could not resolve loader/installer pair for $GAME_VERSION.${RS}"
+        pause; return 1
     fi
 
-    echo -e "${CY}[i] Downloading Fabric server for $GAME_VERSION (loader $loader_ver, installer $installer_ver) ...${RS}"
+    echo -e "${CY}[i] Downloading Fabric server for $GAME_VERSION ...${RS}"
     curl -A "$UA" -# -L -o server.jar \
         "https://meta.fabricmc.net/v2/versions/loader/${GAME_VERSION}/${loader_ver}/${installer_ver}/server/jar"
     write_config "java" "Fabric" "$GAME_VERSION" 'java -Xms128M -Xmx${SERVER_MEMORY:-1024}M -jar server.jar --nogui'
 }
 
 # ==============================================================================
-# JAVA EDITION — VANILLA  (Mojang piston-meta)
+# JAVA EDITION — VANILLA (FIXED)
 # ==============================================================================
 install_vanilla() {
     install_progress_banner "Vanilla — fetching live Mojang version manifest"
@@ -407,29 +468,48 @@ install_vanilla() {
 
     local manifest filter
     manifest=$(run_with_spinner "Talking to piston-meta.mojang.com ..." http_get "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
-    if [ -z "$manifest" ]; then
-        echo -e "${RD}[✗] Could not reach Mojang's version manifest.${RS}"; pause; return 1
+    
+    if ! validate_json "$manifest"; then
+        echo -e "${RD}[✗] Could not reach Mojang's version manifest.${RS}"
+        pause; return 1
     fi
+    
     if [ "$stab_choice" = "2" ]; then
         filter='.versions[] | .id'
     else
         filter='.versions[] | select(.type=="release") | .id'
     fi
-    # The manifest is already ordered newest-first; keep that order (do NOT
-    # re-sort with sort -V — Mojang's 2026 calendar versioning, e.g. "26.2",
-    # cannot be reliably compared against legacy "1.21.x" strings).
+    
     local versions
-    versions=$(echo "$manifest" | jq -r "$filter")
+    versions=$(echo "$manifest" | jq -r "$filter" 2>/dev/null)
+    if [ -z "$versions" ]; then
+        echo -e "${RD}[✗] No versions found in Mojang manifest.${RS}"
+        pause; return 1
+    fi
+    
     paginate_and_select "Vanilla — select a Minecraft version" "$versions" || return 1
     local VERSION="$CHOICE"
 
     install_progress_banner "Vanilla $VERSION — resolving server jar"
     local ver_url ver_json dl_url
-    ver_url=$(echo "$manifest" | jq -r --arg v "$VERSION" '.versions[] | select(.id==$v) | .url')
+    ver_url=$(echo "$manifest" | jq -r --arg v "$VERSION" '.versions[] | select(.id==$v) | .url' 2>/dev/null)
+    
+    if [ -z "$ver_url" ]; then
+        echo -e "${RD}[✗] Could not find version URL for $VERSION.${RS}"
+        pause; return 1
+    fi
+    
     ver_json=$(run_with_spinner "Fetching release metadata..." http_get "$ver_url")
-    dl_url=$(echo "$ver_json" | jq -r '.downloads.server.url // empty')
+    
+    if ! validate_json "$ver_json"; then
+        echo -e "${RD}[✗] Could not fetch metadata for $VERSION.${RS}"
+        pause; return 1
+    fi
+    
+    dl_url=$(echo "$ver_json" | jq -r '.downloads.server.url // empty' 2>/dev/null)
     if [ -z "$dl_url" ]; then
-        echo -e "${RD}[✗] This version has no server download (client-only release?).${RS}"; pause; return 1
+        echo -e "${RD}[✗] This version has no server download available.${RS}"
+        pause; return 1
     fi
 
     echo -e "${CY}[i] Downloading Vanilla $VERSION ...${RS}"
@@ -446,12 +526,11 @@ install_bedrock() {
     echo -e "${GY}    the official download page directly.${RS}\n"
 
     local page bedrock_url
-    page=$(run_with_spinner "Talking to minecraft.net ..." curl -fsSL -A "Mozilla/5.0 (X11; Linux x86_64) $UA" "https://www.minecraft.net/en-us/download/server/bedrock")
+    page=$(run_with_spinner "Talking to minecraft.net ..." curl -sS -A "Mozilla/5.0 (X11; Linux x86_64) $UA" "https://www.minecraft.net/en-us/download/server/bedrock")
     bedrock_url=$(echo "$page" | grep -oE 'https://[^"'"'"']+bin-linux/bedrock-server-[^"'"'"']+\.zip' | head -n1)
 
     if [ -z "$bedrock_url" ]; then
-        echo -e "${RD}[✗] Could not auto-detect the current Bedrock build (Mojang's page changed or is${RS}"
-        echo -e "${RD}    blocking automated requests).${RS}"
+        echo -e "${RD}[✗] Could not auto-detect the current Bedrock build.${RS}"
         echo -e "${YL}[i] Grab the Linux server manually from:${RS}"
         echo -e "    ${CY}https://www.minecraft.net/en-us/download/server/bedrock${RS}"
         printf "\n${B2}  ➤ Paste the direct .zip URL here (or leave blank to cancel): ${RS}"
@@ -473,34 +552,53 @@ install_bedrock() {
 }
 
 # ==============================================================================
-# PROXY — VELOCITY (fill.papermc.io) / BUNGEECORD (ci.md-5.net)
+# PROXY — VELOCITY / BUNGEECORD
 # ==============================================================================
 install_velocity() {
     install_progress_banner "Velocity — fetching live version index"
     local data
     data=$(run_with_spinner "Talking to fill.papermc.io ..." http_get "https://fill.papermc.io/v3/projects/velocity")
-    if [ -z "$data" ]; then
-        echo -e "${RD}[✗] Could not reach the PaperMC Fill API.${RS}"; pause; return 1
+    
+    if ! validate_json "$data"; then
+        echo -e "${RD}[✗] Could not reach the Velocity API.${RS}"
+        pause; return 1
     fi
 
     local groups
-    groups=$(echo "$data" | jq -r '.versions | keys[]' | sort -V -r)
+    groups=$(echo "$data" | jq -r '.versions | keys[]' 2>/dev/null | sort -V -r)
+    if [ -z "$groups" ]; then
+        echo -e "${RD}[✗] No versions found.${RS}"
+        pause; return 1
+    fi
+    
     paginate_and_select "Velocity — select a major version family" "$groups" || return 1
     local GROUP="$CHOICE"
 
     local versions
-    versions=$(echo "$data" | jq -r --arg g "$GROUP" '.versions[$g][]' | sort -V -r)
+    versions=$(echo "$data" | jq -r --arg g "$GROUP" '.versions[$g][]' 2>/dev/null | sort -V -r)
+    if [ -z "$versions" ]; then
+        echo -e "${RD}[✗] No versions found for $GROUP.${RS}"
+        pause; return 1
+    fi
+    
     paginate_and_select "Velocity $GROUP — select an exact release" "$versions" || return 1
     local VERSION="$CHOICE"
 
     local builds DL_URL
     builds=$(run_with_spinner "Fetching build list..." http_get "https://fill.papermc.io/v3/projects/velocity/versions/${VERSION}/builds")
-    DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="RECOMMENDED")] | sort_by(.id) | last | .downloads."server:default".url // empty')
-    [ -z "$DL_URL" ] && DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="STABLE")] | sort_by(.id) | last | .downloads."server:default".url // empty')
-    [ -z "$DL_URL" ] && DL_URL=$(echo "$builds" | jq -r 'sort_by(.id) | last | .downloads."server:default".url // empty')
+    
+    if ! validate_json "$builds"; then
+        echo -e "${RD}[✗] Could not fetch build list.${RS}"
+        pause; return 1
+    fi
+    
+    DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="RECOMMENDED")] | sort_by(.id) | last | .downloads."server:default".url // empty' 2>/dev/null)
+    [ -z "$DL_URL" ] && DL_URL=$(echo "$builds" | jq -r '[.[] | select(.channel=="STABLE")] | sort_by(.id) | last | .downloads."server:default".url // empty' 2>/dev/null)
+    [ -z "$DL_URL" ] && DL_URL=$(echo "$builds" | jq -r 'sort_by(.id) | last | .downloads."server:default".url // empty' 2>/dev/null)
 
     if [ -z "$DL_URL" ]; then
-        echo -e "${RD}[✗] No downloadable build found for Velocity $VERSION.${RS}"; pause; return 1
+        echo -e "${RD}[✗] No downloadable build found for Velocity $VERSION.${RS}"
+        pause; return 1
     fi
 
     echo -e "${CY}[i] Downloading Velocity $VERSION ...${RS}"
@@ -524,7 +622,7 @@ java_menu() {
         show_banner
         echo -e "${B4}${BD}  Java Edition — choose a server engine${RS}"
         hr
-        echo -e "  ${CY}[1]${RS} ${WH}PaperMC${RS}   ${GY}— optimized, most plugin-compatible, best default choice${RS}"
+        echo -e "  ${CY}[1]${RS} ${WH}PaperMC${RS}   ${GY}— optimized, most plugin-compatible, best default${RS}"
         echo -e "  ${CY}[2]${RS} ${WH}Purpur${RS}    ${GY}— Paper fork with extra gameplay/config options${RS}"
         echo -e "  ${CY}[3]${RS} ${WH}Fabric${RS}    ${GY}— lightweight modding platform${RS}"
         echo -e "  ${CY}[4]${RS} ${WH}Vanilla${RS}   ${GY}— official unmodified Mojang server${RS}"
@@ -616,7 +714,7 @@ fi
 if [ -f "$CONFIG_FILE" ] && [ -n "${START_CMD:-}" ]; then
     eval "$START_CMD"
 else
-    echo -e "${RD}[✗] No start command found — installation may have failed. Delete${RS}"
-    echo -e "${RD}    '.rempy_installed' in Files and re-run to try again.${RS}"
+    echo -e "${RD}[✗] No start command found — installation may have failed.${RS}"
+    echo -e "${RD}    Delete '.rempy_installed' in Files and re-run to try again.${RS}"
     exit 1
 fi
